@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "min_chars": 6,
+  "api_timeout": 3.5,
+  "history_turns": 20,
+  "history_chars": 800,
+  "memory_chars": 1500,
+  "show_verdict": true,
+  "_note": "enabled=false 完全关闭前置判读；min_chars 以下不调用 API；api_timeout 超时即静默放行；show_verdict 让模型把判定回显给用户。state 总预算固定 8000 字符（见脚本内 STATE_BUDGET），优先级：新消息 > 项目记忆 > 历史"
+}

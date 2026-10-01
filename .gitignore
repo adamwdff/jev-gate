@@ -1,0 +1,8 @@
+.typesafe_key
+.env
+*.env
+jev_log.jsonl
+jev_circuit.json
+__pycache__/
+*.pyc
+.DS_Store
