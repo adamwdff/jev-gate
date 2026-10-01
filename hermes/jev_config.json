@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "min_chars": 6,
+  "api_timeout": 3.5,
+  "history_turns": 20,
+  "history_chars": 800,
+  "memory_chars": 1500,
+  "show_verdict": true,
+  "skip_platforms": [
+    "cron"
+  ]
+}

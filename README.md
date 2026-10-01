@@ -1,8 +1,8 @@
 # Jev Pre-flight Gate
 
-在 WorkBuddy 里，**模型读你的提示词之前**，先让 Jev（TypeSafe System One 判定模型）花 ~1 秒对这次请求做一次结构化判定，把结论注入给主模型当路由提示。
+在 **WorkBuddy / Hermes Agent** 里，**模型读你的提示词之前**，先让 Jev（TypeSafe System One 判定模型）花 ~1 秒对这次请求做一次结构化判定，把结论注入给主模型当路由提示。
 
-一个 `UserPromptSubmit` hook + 两个脚本，零依赖、纯标准库 Python。
+一个 hook + 两个脚本，零依赖、纯标准库 Python。WorkBuddy 走 `UserPromptSubmit`，Hermes 走 shell hook `pre_llm_call`——判定逻辑同一份，安装各一份。
 
 ---
 
@@ -18,21 +18,36 @@ Jev 在提示词进来的一瞬间先判一次，把"这件事不需要读文件
 
 ## 一句话给自己装
 
+**WorkBuddy：**
+
 ```bash
 git clone https://github.com/adamwdff/jev-gate.git && cd jev-gate && python3 install.py
 ```
 
 缺 key 时脚本会 `exit 2` 并告诉你去哪儿拿。**装完必须完全退出重启 WorkBuddy**（hooks 在会话启动时快照）。
 
+**Hermes Agent：**
+
+```bash
+git clone https://github.com/adamwdff/jev-gate.git && cd jev-gate && python3 hermes/install_hermes.py
+```
+
+Hermes 没有 `UserPromptSubmit`，对应事件是 **`pre_llm_call`**；注入走用户消息（不破 prompt cache），开关是 `/jev` `/jev-on` `/jev-off` 三条 exec 快捷命令。细节见 [`hermes/README.md`](hermes/README.md)。**装完必须新开一轮会话**，gateway 用户 `hermes gateway restart`。
+
 ---
 
 ## 把链接给别人：让对方的 Agent 自己装
 
-让对方把这个仓库链接丢给他的 agent 即可，agent 会读 `AGENT_INSTALL.md`。推荐提示词：
+让对方把这个仓库链接丢给他的 agent 即可，agent 会读对应的安装说明：
+
+- WorkBuddy → `AGENT_INSTALL.md`
+- Hermes Agent → `AGENT_INSTALL_HERMES.md`
+
+推荐提示词（WorkBuddy）：
 
 > 请读取 https://raw.githubusercontent.com/adamwdff/jev-gate/main/AGENT_INSTALL.md ，按里面的步骤帮我在本机 WorkBuddy 装好 Jev pre-flight gate。我没有 TypeSafe API key 时请你停下来问我要，不要自己编。
 
-`AGENT_INSTALL.md` 里写死了三条硬约束，防止 agent 糊弄：
+Hermes 用户把上面 URL 换成 `AGENT_INSTALL_HERMES.md`、WorkBuddy 换成 Hermes Agent 即可。两份说明都写死了三条硬约束，防止 agent 糊弄：
 
 1. **没有 key 必须先停下来问人**——不许编造、不许用占位符、不许跳过。
 2. **key 只落 `~/.workbuddy/.typesafe_key`（0600）**——不进 git、不进 `settings.json`、不在对话里回显。
@@ -85,12 +100,17 @@ cues: do NOT ask to confirm — act now; read the relevant files first, do not g
 ## 仓库结构
 
 ```
-hooks/jev_gate.py     UserPromptSubmit hook —— 核心
+hooks/jev_gate.py     WorkBuddy UserPromptSubmit hook —— 核心
 hooks/jev_ask.py      任务中途单次调用 Jev 的小工具
-hooks/jev_config.json 默认配置
-install.py            一键安装 / --check 体检
-AGENT_INSTALL.md      给 AI Agent 的安装说明（引导填 key 在这）
-docs/DESIGN.md        设计取舍与踩过的坑
+hooks/jev_config.json WorkBuddy 默认配置
+install.py            WorkBuddy 一键安装 / --check 体检
+hermes/jev_gate.py    Hermes shell hook（pre_llm_call）—— 同一判定逻辑
+hermes/install_hermes.py  Hermes 一键安装 / --check 体检（追加式改 config，不重写）
+hermes/jev_config.json    Hermes 默认配置（多一个 skip_platforms）
+hermes/README.md      Hermes 版说明与排错
+AGENT_INSTALL.md      给 AI Agent 的 WorkBuddy 安装说明（引导填 key 在这）
+AGENT_INSTALL_HERMES.md  给 AI Agent 的 Hermes 安装说明
+docs/DESIGN.md        设计取舍与踩过的坑（含 Hermes 移植一节）
 ```
 
 ---
@@ -99,5 +119,5 @@ docs/DESIGN.md        设计取舍与踩过的坑
 
 - **fail-open 铁律**：无 key、超时、报错、返回空——一律 `exit 0` 静默放行，**绝不阻塞用户提问**。
 - **熔断**：连续 3 次失败后冷却 10 分钟不再调 API，否则网络不通时每条提问都被超时拖慢。
-- **key 与配置分离**：key 在 `~/.workbuddy/.typesafe_key`（0600），不在 `settings.json`、不在仓库里。
+- **key 与配置分离**：key 在 `~/.workbuddy/.typesafe_key`（WorkBuddy）或 `$HERMES_HOME/.typesafe_key`（Hermes），权限 0600，不在 `settings.json` / `config.yaml`、不在仓库里。
 - `.gitignore` 已屏蔽 `.typesafe_key`、`.env`、`jev_log.jsonl`。日志含 prompt 前 120 字，排错用，**别外传**。

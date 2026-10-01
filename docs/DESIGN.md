@@ -91,6 +91,83 @@
 
 ## 9. 已知遗留
 
-- `skill_route` 选项集缺 `diagnosis`，把"验证一下""确认是否"类判成 `ops`（已 2 次）。加选项即可。
+- `skill_route` 选项集缺 `diagnosis`，把"验证一下""确认是否"类判成 `ops`（已 2 次）。加选项即可。→ **Hermes 版已补**（见第 10 节）。
 - `confidence` 只反映分布尖锐度，**不反映对错**。曾出现 0.88 判 ambiguous、0.96 判 ops 的高置信误报。阈值别卡太死。
 - 改动 `jev_gate.py` 或 `settings.json` 后**必须重启 WorkBuddy**（hooks 在会话启动时快照）。
+
+---
+
+## 10. Hermes 移植（`pre_llm_call`）
+
+结论 → 为什么，跟上面同一写法。
+
+### 10.1 入口是 `pre_llm_call`，不是 skill
+
+Hermes 没有 `UserPromptSubmit` 事件。官方文档 `user-guide/features/hooks.md` 明确写着：**Claude Code 的 `UserPromptSubmit` 对应 `pre_llm_call`**，并给了"注入 cwd 上下文"的等价示例。
+
+关键差别不是事件名，而是**注入落点**：Hermes 把 hook 的 `{"context": ...}` 追加到**本轮用户消息**（不是系统提示）。这是它的缓存不变量——系统提示在一次会话里逐字节稳定，只有压缩能改。所以判定块跟着用户消息走，prompt cache 依然命中；WorkBuddy 的 `additionalContext` 是另一个通道，此处不通用。
+
+skill 依旧做不到（同第 1 节）：skill 是模型侧的被选项，模型得先读完消息才能决定加载谁。
+
+### 10.2 历史不用解析文件——第 3 节那个 bug 不可能复现
+
+Hermes 直接把活的 `conversation_history`（OpenAI 格式消息列表）放进 hook 的 stdin：
+
+```json
+{"hook_event_name": "pre_llm_call", "session_id": "...", "cwd": "...",
+ "extra": {"user_message": "...", "conversation_history": [...],
+           "is_first_turn": false, "model": "...", "platform": "cli"}}
+```
+
+层级、role 位置、`<system-reminder>` 剥离全都不用管了——第 3 节踩的坑在这一侧没有对应物。仍然要**跳过 tool 行**（它们的 content 是工具输出，不是人说的话）。
+
+### 10.3 没有 exit 2，开关改用 quick_commands
+
+WorkBuddy 的 `/jev` 靠 hook 自消费（`exit 2` 清掉提示词、只回显 stdout）。Hermes 的 shell hook **不能吞掉一轮对话**，所以开关落在 `config.yaml` 的 `quick_commands`，`type: exec` 直接跑脚本：
+
+```yaml
+quick_commands:
+  jev:      {type: exec, command: ".../jev_gate.py status"}
+  jev-on:   {type: exec, command: ".../jev_gate.py on"}
+  jev-off:  {type: exec, command: ".../jev_gate.py off"}
+```
+
+**零模型 token** 的效果一样（exec 不经过模型）。两个必须知道的限制：exec 形式拿不到参数（所以是三条而不是一条 `/jev <arg>`）；且只在交互式界面生效——`hermes chat -q "/jev"` 会把字面量当消息发给模型。
+
+### 10.4 平台隔离：cron 必须排除
+
+一个 Hermes 核心同时跑 cron / gateway / 桌面 / CLI。日报那类定时任务不需要路由提示，也不该付这 1 秒——`skip_platforms: ["cron"]`（payload 里 `extra.platform == "cron"`）。网关会话照付。
+
+### 10.5 禁止性 cue 之间不能互相打架（新问题，WorkBuddy 版也有）
+
+实测同一轮判定可以同时产出：
+
+```
+cues: do NOT read files or grep — nothing on disk is needed;
+      under-specified — ask one clarifying question before acting
+```
+
+一边禁止看盘、一边让人追问，模型只能猜（而猜正是禁令要防的）。原版的规则是各判各的，没有互斥检查。Hermes 版加了收口：**ambiguity 判 ambiguous 时，两条"别去看"的禁令全部收回**，只留下追问和产出长度。
+
+### 10.6 记忆预算要按文件平分
+
+原版 `load_memory()` 是"按顺序读，超预算就停"。WorkBuddy 下记忆文件小，看不出问题；Hermes 的 `~/.hermes/memories/USER.md`（2.2KB）会直接把 `MEMORY.md` 挤掉，而后者才是环境事实——短追问于是永远被判 ambiguous。改成按存在的文件平分预算。
+
+### 10.7 装到别人机器的两个坑
+
+- **非 TTY 不会弹授权**。Hermes 的 shell hook 首次使用要授权（`(event, command)` 对，写进 `shell-hooks-allowlist.json`）；gateway、cron、桌面后端都没有 TTY，不写 allowlist 的 hook **静默不生效**。所以安装脚本必须替用户写授权。
+- **别用 `hermes config set` 改用户配置**。它会重新 dump 整个 YAML，**注释全丢**（实测：同机配置的尾部注释块被抹掉）。安装脚本改成往文件尾**追加**文本 + 追加后校验，失败自动回滚。
+
+### 10.8 Agent 不能写 Hermes 的配置文件
+
+让 agent 用 `patch`/`write_file` 直接改 `~/.hermes/config.yaml` 会被硬拦（`Refusing to write to Hermes config file`）——这是有意的安全边界。允许的路径是 `hermes config set <key> '<yaml或json>'`（能解析结构化值），或者让**用户自己**跑安装脚本。设计安装流程时按这个边界来。
+
+### 10.9 成本实测
+
+- 判定 API ~0.9–1.1s（与 WorkBuddy 一致，state 更大也不敏感）。
+- 进程 spawn + 1MB 的 `conversation_history` 经由 stdin 传过来，总耗时 1.18s——父进程侧的 JSON 序列化本身是 Hermes 付的，不是 hook 的账。
+- 注入块 ~300–400 token，与 WorkBuddy 同量级。
+
+### 10.10 `min_chars` 是字符数
+
+`现在几点了` 是 5 个字符 → 静默跳过。排查"hook 是不是坏了"时先数一遍，比看日志快。
